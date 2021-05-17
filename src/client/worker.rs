@@ -1,6 +1,6 @@
 //! Handlers for all incoming data
 use super::{
-    client::{Client, ClientState},
+    client::{Client, State, ClientState},
     observer::OBSERVER,
     tdlib_client::{TdJson, TdLibClient},
 };
@@ -222,7 +222,7 @@ where
     }
 }
 
-type ClientsMap<S> = HashMap<ClientId, (Client<S>, mpsc::Sender<ClientState>)>;
+type ClientsMap<S> = HashMap<ClientId, (Client<S>, mpsc::Sender<State>)>;
 
 /// The main object in all interactions.
 /// You have to [start](crate::client::worker::Worker::start] worker and bind each client with worker using [auth_client](crate::client::worker::Worker::auth_client).
@@ -255,51 +255,53 @@ where
     pub async fn auth_client(
         &mut self,
         mut client: Client<T>,
-    ) -> RTDResult<(JoinHandle<ClientState>, Client<T>)> {
+    ) -> RTDResult<Client<T>> {
         if !self.is_running() {
             return Err(RTDError::BadRequest("worker not started yet"));
         };
         let client_id = self.tdlib_client.new_client();
         log::debug!("new client created: {}", client_id);
         client.set_client_id(client_id)?;
-        let (sx, mut rx) = mpsc::channel::<ClientState>(10);
-        self.clients
-            .write()
-            .await
-            .insert(client_id, (client.clone(), sx));
-        log::debug!("new client added");
 
-        client
-            .get_application_config(GetApplicationConfig::builder().build())
-            .await?;
+        let (sx, mut rx) = mpsc::channel::<State>(10);
+        let clients = self.clients.clone();
+        let to_insert = (client.clone(), sx);
 
-        log::trace!("received first internal response");
 
-        if let Some(msg) = rx.recv().await {
-            match msg {
-                ClientState::Closed => {
-                    log::debug!("client state on auth: closed");
-                    return Ok((tokio::spawn(async { ClientState::Closed }), client));
+        let job = tokio::spawn(async move {
+            {
+                clients.write().await.insert(client_id, to_insert)
+            };
+            log::debug!("new client added");
+
+            if let Some(msg) = rx.recv().await {
+                match msg {
+                    State::Closed => {
+                        log::debug!("client state on auth: closed");
+                        return Ok(State::Closed );
+                    }
+                    State::Error(e) => {
+                        log::debug!("client state on auth: error");
+                        return Err(RTDError::TdlibError(e));
+                    }
+                    State::Opened => {
+                        log::debug!("client state on auth: opened");
+                    }
                 }
-                ClientState::Error(e) => {
-                    log::debug!("client state on auth: error");
-                    return Err(RTDError::TdlibError(e));
-                }
-                ClientState::Opened => {
-                    log::debug!("client state on auth: opened");
-                }
-            }
-        }
-        let h = tokio::spawn(async move {
-            match rx.recv().await {
-                Some(ClientState::Opened) => {
-                    ClientState::Error("received Opened state again".to_string())
+            };
+
+            Ok(match rx.recv().await {
+                Some(State::Opened) => {
+                    State::Error("received Opened state again".to_string())
                 }
                 Some(state) => state,
-                None => ClientState::Error("auth state channel closed".to_string()),
-            }
+                None => State::Error("auth state channel closed".to_string()),
+            })
         });
-        Ok((h, client))
+
+        let mut state = ClientState::new();
+        state.set_job(job);
+        Ok(client.set_state(state))
     }
 
     /// Determines that the worker is running.
@@ -310,7 +312,7 @@ where
     #[cfg(test)]
     // Method needs for tests because we can't handle get_application_config request properly.
     pub async fn set_client(&mut self, mut client: Client<T>) -> Client<T> {
-        let (sx, _) = mpsc::channel::<ClientState>(10);
+        let (sx, _) = mpsc::channel::<State>(10);
         let cl = self.tdlib_client.new_client();
         self.clients.write().await.insert(cl, (client.clone(), sx));
         client.set_client_id(cl).unwrap();
@@ -339,7 +341,7 @@ where
 
     /// Starts interaction with TDLib.
     /// It returns [JoinHandle](tokio::task::JoinHandle) which allows you to handle worker state.
-    pub fn start(&mut self) -> JoinHandle<ClientState> {
+    pub fn start(&mut self) -> JoinHandle<State> {
         let (auth_sx, auth_rx) = mpsc::channel::<UpdateAuthorizationState>(20);
 
         self.run_flag.store(true, Ordering::Release);
@@ -352,15 +354,15 @@ where
             let res_state = tokio::select! {
                 a = auth_handle => match a {
                     Ok(_) => {
-                        ClientState::Closed
+                        State::Closed
                     },
-                    Err(e) => ClientState::Error(e.to_string()),
+                    Err(e) => State::Error(e.to_string()),
                 },
                 u = updates_handle => match u {
                     Ok(_) => {
-                        ClientState::Closed
+                        State::Closed
                     },
-                    Err(e) => ClientState::Error(e.to_string()),
+                    Err(e) => State::Error(e.to_string()),
                 },
             };
             run_flag.store(false, Ordering::Release);
@@ -474,7 +476,7 @@ where
 
 async fn handle_auth_state<A: AuthStateHandler, R: TdLibClient + Clone>(
     client: &Client<R>,
-    auth_sender: &mpsc::Sender<ClientState>,
+    auth_sender: &mpsc::Sender<State>,
     auth_state_handler: &A,
     state: UpdateAuthorizationState,
     send_state_timeout: time::Duration,
@@ -484,7 +486,7 @@ async fn handle_auth_state<A: AuthStateHandler, R: TdLibClient + Clone>(
         AuthorizationState::_Default => Ok(()),
         AuthorizationState::Closed(_) => {
             auth_sender
-                .send_timeout(ClientState::Closed, send_state_timeout)
+                .send_timeout(State::Closed, send_state_timeout)
                 .await?;
             Ok(())
         }
@@ -493,7 +495,7 @@ async fn handle_auth_state<A: AuthStateHandler, R: TdLibClient + Clone>(
         AuthorizationState::Ready(_) => {
             log::debug!("ready state received, send signal");
             auth_sender
-                .send_timeout(ClientState::Opened, send_state_timeout)
+                .send_timeout(State::Opened, send_state_timeout)
                 .await?;
             Ok(())
         }

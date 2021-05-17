@@ -7,15 +7,38 @@ use crate::{
     types::*,
 };
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use std::sync::Arc;
 
 const CLOSED_RECEIVER_ERROR: RTDError = RTDError::Internal("receiver already closed");
 const INVALID_RESPONSE_ERROR: RTDError = RTDError::Internal("receive invalid response");
 const NO_EXTRA: RTDError =
     RTDError::Internal("invalid tdlib response type, not have `extra` field");
 
+#[derive(Debug, Clone)]
+pub struct ClientState {
+    state: State,
+    job: Option<Arc<JoinHandle<RTDResult<State>>>>
+}
+
+impl ClientState {
+    pub fn new() -> Self {
+        Self {
+            state: State::Closed,
+            job: None,
+        }
+    }
+
+    pub(crate) fn set_job(&mut self, job: JoinHandle<RTDResult<State>>) {
+        self.job = Some(Arc::new(job))
+    }
+
+}
+
+
 /// Represents state of particular client instance.
 #[derive(Debug, Clone)]
-pub enum ClientState {
+pub enum State {
     /// Client opened. You can start interaction
     Opened,
     /// Client closed properly. You must reopen it if you want to interact with Telegram
@@ -36,6 +59,7 @@ where
     is_started: bool,
     updates_sender: Option<mpsc::Sender<Update>>,
     tdlib_parameters: TdlibParameters,
+    state: ClientState,
 }
 
 impl<S> Client<S>
@@ -44,6 +68,15 @@ where
 {
     pub(crate) fn tdlib_parameters(&self) -> &TdlibParameters {
         &self.tdlib_parameters
+    }
+
+    pub fn get_state(&self) -> &ClientState {
+        &self.state
+    }
+
+    pub(crate) fn set_state(mut self, state: ClientState) -> Self{
+        self.state = state;
+        self
     }
 
     fn get_client_id(&self) -> RTDResult<i32> {
@@ -152,6 +185,7 @@ where
             tdlib_parameters,
             is_started: false,
             client_id: None,
+            state: ClientState::new(),
         }
     }
 
