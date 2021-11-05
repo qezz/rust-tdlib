@@ -23,7 +23,7 @@ edition = "2018"
 all-features = true
 
 [features]
-client = ["tokio", "lazy_static", "async-trait", "log", "tdjson"]
+client = ["lazy_static", "async-trait", "log", "tdjson"]
 tdjson = []
 default = ["client"]
 
@@ -38,11 +38,11 @@ serde_json = "1"
 
 log = { version = "0.4", optional = true }
 lazy_static = { version = "1.4", optional = true }
-tokio = { version = "1", features = ["sync", "macros"], optional = true}
+tokio = { version = "1.13", features = ["sync", "macros"] }
 async-trait = { version = "0.1", optional = true }
 
 
 [dev-dependencies]
-tokio = {version = "1", features = ["macros", "rt-multi-thread", "sync", "time"]}
+tokio = { version = "1.13", features = ["macros", "rt-multi-thread", "sync", "time"]}
 log = { version = "0.4" }
 env_logger = "0.8"
